@@ -1,0 +1,247 @@
+{
+  "name": "YouTube Indexsy Daily Summarizer",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 24,
+              "triggerAtHour": 8
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Daily 8am Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCS1LT_WoYAIHW5KcUNxXYEw",
+        "options": {}
+      },
+      "id": "fetch-rss",
+      "name": "Fetch Indexsy RSS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse YouTube RSS feed and extract recent videos\nconst xmlData = $input.first().json.data;\n\n// Simple XML parsing for YouTube RSS\nconst entries = xmlData.match(/<entry>[\\s\\S]*?<\\/entry>/g) || [];\n\nconst videos = entries.slice(0, 5).map(entry => {\n  const videoId = entry.match(/<yt:videoId>([^<]+)<\\/yt:videoId>/)?.[1];\n  const title = entry.match(/<title>([^<]+)<\\/title>/)?.[1];\n  const published = entry.match(/<published>([^<]+)<\\/published>/)?.[1];\n  \n  return {\n    videoId,\n    title,\n    published,\n    publishedDate: new Date(published),\n    url: `https://www.youtube.com/watch?v=${videoId}`\n  };\n}).filter(v => v.videoId);\n\n// Filter to videos from last 7 days (adjust as needed)\nconst sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);\nconst recentVideos = videos.filter(v => v.publishedDate > sevenDaysAgo);\n\nreturn recentVideos.map(v => ({ json: v }));"
+      },
+      "id": "parse-rss",
+      "name": "Parse RSS & Filter Recent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "url": "=http://localhost:5111/transcript/{{ $json.videoId }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "get-transcript",
+      "name": "Get Transcript",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 0],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-success",
+              "leftValue": "={{ $json.success }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "filter-success",
+      "name": "Has Transcript?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [880, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"claude-sonnet-4-20250514\",\n  \"max_tokens\": 1500,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"You are analyzing a YouTube video transcript from Indexsy (SEO/marketing channel).\\n\\nVideo Title: {{ $('Parse RSS & Filter Recent').item.json.title }}\\n\\nProvide:\\n1. **Summary** (2-3 sentences)\\n2. **Key Insights** (bullet points of the most valuable ideas)\\n3. **Action Items** (specific things to implement)\\n\\nTranscript:\\n{{ $json.transcript.substring(0, 15000) }}\"\n    }\n  ]\n}"
+      },
+      "id": "summarize-claude",
+      "name": "Summarize with Claude",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, -100],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Anthropic API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format the final output\nconst claudeResponse = $input.first().json;\nconst videoInfo = $('Parse RSS & Filter Recent').item.json;\n\nconst summary = claudeResponse.content?.[0]?.text || 'Failed to generate summary';\n\nreturn [{\n  json: {\n    title: videoInfo.title,\n    url: videoInfo.url,\n    published: videoInfo.published,\n    summary: summary,\n    generatedAt: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "format-output",
+      "name": "Format Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, -100]
+    },
+    {
+      "parameters": {
+        "sendTo": "YOUR_EMAIL@example.com",
+        "subject": "=Indexsy Daily Summary: {{ $json.title }}",
+        "emailType": "html",
+        "message": "=<h2>{{ $json.title }}</h2>\n<p><a href=\"{{ $json.url }}\">Watch Video</a> | Published: {{ $json.published }}</p>\n<hr>\n{{ $json.summary.replace(/\\n/g, '<br>') }}\n<hr>\n<p><em>Generated at {{ $json.generatedAt }}</em></p>"
+      },
+      "id": "send-email",
+      "name": "Send Email Summary",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1540, -100],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_YOUR_GMAIL_CREDENTIAL_ID",
+          "name": "Gmail"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "no-transcript",
+      "name": "No Transcript Available",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1100, 100]
+    }
+  ],
+  "connections": {
+    "Daily 8am Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Indexsy RSS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Indexsy RSS": {
+      "main": [
+        [
+          {
+            "node": "Parse RSS & Filter Recent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse RSS & Filter Recent": {
+      "main": [
+        [
+          {
+            "node": "Get Transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Transcript": {
+      "main": [
+        [
+          {
+            "node": "Has Transcript?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Transcript?": {
+      "main": [
+        [
+          {
+            "node": "Summarize with Claude",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Transcript Available",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarize with Claude": {
+      "main": [
+        [
+          {
+            "node": "Format Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Output": {
+      "main": [
+        [
+          {
+            "node": "Send Email Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
